@@ -6,7 +6,9 @@ import { existsSync, mkdirSync } from "node:fs";
  *
  * Runs after the API is healthy and aggregates all results into a single exit
  * code (0 = every stage passed, 1 = one or more stages failed):
- *   1. code tests (node:test unit + HTTP integration suites)
+ *   1. code tests (node:test unit + HTTP integration suites, including the
+ *      restore/quarantine regression: legitimate restore, the corrupt
+ *      restore-batch sample, alias uniqueness, reference closure, privacy)
  *   2. TypeScript build (strict tsc type-check)
  *   3. submit/query smoke against the live API, including:
  *      - first submission -> 201, identical retry -> 200 with the same result
@@ -220,6 +222,7 @@ async function main(): Promise<void> {
       "--test",
       "test/manifest.test.ts",
       "test/api.test.ts",
+      "test/restore.test.ts",
     ]),
     runCommand("typescript build", process.execPath, [
       "node_modules/typescript/bin/tsc",

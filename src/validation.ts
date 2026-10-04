@@ -17,18 +17,25 @@ import { ID_CLASSES, ValidationFailed } from "./types.ts";
 
 const MAX_ID_LENGTH = 256;
 const MAX_BATCH_ID_LENGTH = 128;
-const MAX_RECORDS = 10_000;
 const MAX_MEASUREMENT_KEYS = 1_000;
 const MAX_STRING_VALUE_LENGTH = 10_000;
-const MAX_RELATED = 1_000;
+// Shared with restore-time integrity validation: persisted manifests were
+// produced from validated input, so the same limits are part of their contract.
+export const MAX_RECORDS = 10_000;
+export const MAX_RELATED = 1_000;
 
 /** Conservative identifier charset; implicitly forbids whitespace and control chars. */
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/\-]{0,255}$/;
-const BATCH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/;
+export const BATCH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/;
 const MEASUREMENT_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.:/\-]{0,255}$/;
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-class IssueCollector {
+/** Minimal issue sink shared by inbound and restore-time contract validation. */
+export interface IssueSink {
+  add(code: string, path: string, message: string): void;
+}
+
+class IssueCollector implements IssueSink {
   readonly issues: ValidationIssue[] = [];
 
   add(code: string, path: string, message: string): void {
@@ -40,7 +47,7 @@ class IssueCollector {
   }
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -51,7 +58,7 @@ function isValidId(value: unknown): value is string {
 function validateMeasurementValue(
   value: unknown,
   path: string,
-  issues: IssueCollector,
+  issues: IssueSink,
 ): value is MeasurementValue {
   if (value === null) return true;
   const t = typeof value;
@@ -76,6 +83,49 @@ function validateMeasurementValue(
     "measurement value must be a string, number, boolean or null",
   );
   return false;
+}
+
+/**
+ * Validate a measurements object and return its validated entries.
+ *
+ * Measurements pass through the sharing pipeline verbatim, so the inbound and
+ * the persisted-restore contracts are identical and share this single
+ * implementation. Every violation is reported to the sink (paths and rule
+ * codes only, never values).
+ */
+export function validateMeasurements(
+  raw: unknown,
+  path: string,
+  issues: IssueSink,
+): Record<string, MeasurementValue> {
+  if (!isPlainObject(raw)) {
+    issues.add("measurements_not_object", path, "measurements must be a JSON object");
+    return {};
+  }
+  const measurements: Record<string, MeasurementValue> = {};
+  const keys = Object.keys(raw);
+  if (keys.length > MAX_MEASUREMENT_KEYS) {
+    issues.add("too_many_measurements", path, "too many measurement items");
+  }
+  for (const key of keys) {
+    const mPath = `${path}.${key}`;
+    if (FORBIDDEN_KEYS.has(key)) {
+      issues.add("forbidden_measurement_key", mPath, "reserved measurement keys are not allowed");
+      continue;
+    }
+    if (!MEASUREMENT_KEY_PATTERN.test(key)) {
+      issues.add(
+        "invalid_measurement_key",
+        mPath,
+        "measurement keys must be non-empty printable identifiers",
+      );
+      continue;
+    }
+    if (validateMeasurementValue(raw[key], mPath, issues)) {
+      measurements[key] = raw[key] as MeasurementValue;
+    }
+  }
+  return measurements;
 }
 
 function validateRecord(raw: unknown, index: number, issues: IssueCollector): InputRecord | null {
@@ -148,40 +198,7 @@ function validateRecord(raw: unknown, index: number, issues: IssueCollector): In
   }
 
   // measurements: plain object of scalar values.
-  let measurements: Record<string, MeasurementValue> = {};
-  {
-    const rawMeasurements = raw.measurements;
-    if (!isPlainObject(rawMeasurements)) {
-      issues.add(
-        "measurements_not_object",
-        `${path}.measurements`,
-        "measurements must be a JSON object",
-      );
-    } else {
-      const keys = Object.keys(rawMeasurements);
-      if (keys.length > MAX_MEASUREMENT_KEYS) {
-        issues.add("too_many_measurements", `${path}.measurements`, "too many measurement items");
-      }
-      for (const key of keys) {
-        const mPath = `${path}.measurements.${key}`;
-        if (FORBIDDEN_KEYS.has(key)) {
-          issues.add("forbidden_measurement_key", mPath, "reserved measurement keys are not allowed");
-          continue;
-        }
-        if (!MEASUREMENT_KEY_PATTERN.test(key)) {
-          issues.add(
-            "invalid_measurement_key",
-            mPath,
-            "measurement keys must be non-empty printable identifiers",
-          );
-          continue;
-        }
-        if (validateMeasurementValue(rawMeasurements[key], mPath, issues)) {
-          measurements[key] = rawMeasurements[key] as MeasurementValue;
-        }
-      }
-    }
-  }
+  const measurements = validateMeasurements(raw.measurements, `${path}.measurements`, issues);
 
   if (
     typeof recordId !== "string" ||

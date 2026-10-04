@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node --experimental-strip-types src/index.ts",
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.json",
-    "test": "node --experimental-strip-types --test test/manifest.test.ts test/api.test.ts",
+    "test": "node --experimental-strip-types --test test/manifest.test.ts test/api.test.ts test/restore.test.ts",
     "verify": "node --experimental-strip-types scripts/verify.ts"
   },
   "devDependencies": {

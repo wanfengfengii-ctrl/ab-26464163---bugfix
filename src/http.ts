@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { Aliaser } from "./alias.ts";
 import { contentHash } from "./canonical.ts";
 import { transformBatch } from "./transform.ts";
-import { validateBatch } from "./validation.ts";
+import { BATCH_ID_PATTERN, validateBatch } from "./validation.ts";
 import { log } from "./log.ts";
 import { ManifestStore } from "./store.ts";
 import {
@@ -21,8 +21,6 @@ class HttpError extends Error {
     this.code = code;
   }
 }
-
-const BATCH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/;
 
 export interface ServerDeps {
   store: ManifestStore;
@@ -87,6 +85,16 @@ export function createAppServer(deps: ServerDeps) {
     const manifest = transformBatch(batch, new Aliaser(aliasSecret), hash);
 
     const outcome = await store.create(batch.batchId, hash, manifest);
+    if (outcome.status === "quarantined") {
+      // A corrupt restored entry owns this batchId; never silently overwrite
+      // it. The batchId stays blocked until an operator clears the quarantine.
+      log.warn("manifest_quarantined_write_refused", { batchId: batch.batchId });
+      throw new HttpError(
+        409,
+        "manifest_quarantined",
+        "a quarantined manifest exists for this batchId; refusing to overwrite it",
+      );
+    }
     if (outcome.status === "conflict") {
       throw new BatchConflictError(batch.batchId);
     }
@@ -103,6 +111,15 @@ export function createAppServer(deps: ServerDeps) {
   function handleGetManifest(res: any, batchId: string): void {
     if (!BATCH_ID_PATTERN.test(batchId)) {
       throw new HttpError(404, "not_found", "route not found");
+    }
+    if (store.isQuarantined(batchId)) {
+      // The entry exists but failed restore-time integrity validation: it is
+      // isolated, never served, and visibly distinct from "never existed".
+      throw new HttpError(
+        409,
+        "manifest_quarantined",
+        "the manifest stored for this batchId failed integrity validation and has been quarantined",
+      );
     }
     const manifest = store.get(batchId);
     if (manifest === undefined) {
