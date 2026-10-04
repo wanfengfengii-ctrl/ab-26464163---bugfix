@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { Aliaser } from "./alias.ts";
 import { contentHash } from "./canonical.ts";
 import { transformBatch } from "./transform.ts";
-import { validateBatch } from "./validation.ts";
+import { BATCH_ID_PATTERN, validateBatch } from "./validation.ts";
 import { log } from "./log.ts";
 import { ManifestStore } from "./store.ts";
 import {
@@ -21,8 +21,6 @@ class HttpError extends Error {
     this.code = code;
   }
 }
-
-const BATCH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/;
 
 export interface ServerDeps {
   store: ManifestStore;

@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { Aliaser } from "../src/alias.ts";
+import { contentHash } from "../src/canonical.ts";
+import { CorruptStoreError, ManifestStore } from "../src/store.ts";
+import { transformBatch } from "../src/transform.ts";
+import { validateBatch } from "../src/validation.ts";
 
 /**
  * One-shot verification entrypoint (the `verify` compose service).
@@ -8,7 +17,10 @@ import { existsSync, mkdirSync } from "node:fs";
  * code (0 = every stage passed, 1 = one or more stages failed):
  *   1. code tests (node:test unit + HTTP integration suites)
  *   2. TypeScript build (strict tsc type-check)
- *   3. submit/query smoke against the live API, including:
+ *   3. recovery safety: valid manifests survive a restart, while corrupt
+ *      restored entries (the restore-batch sample, duplicate aliases,
+ *      unclosed references) abort the load without leaking raw identifiers
+ *   4. submit/query smoke against the live API, including:
  *      - first submission -> 201, identical retry -> 200 with the same result
  *      - GET returns the stored document
  *      - cross-batch alias stability and per-category isolation
@@ -206,6 +218,136 @@ async function runSmoke(): Promise<boolean> {
   }
 }
 
+/**
+ * Recovery-path checks, run against local throwaway data dirs (the live API
+ * keeps serving valid traffic, so corrupt-volume scenarios are exercised
+ * here instead of by poisoning the shared volume):
+ *   - a valid persisted manifest is queryable after a restart
+ *   - the confirmed corrupt restore-batch sample aborts the load, is never
+ *     served, and its raw identifiers never appear in diagnostics
+ *   - duplicate record aliases and unclosed references are rejected
+ */
+async function runRecoverySmoke(): Promise<boolean> {
+  process.stdout.write("\n=== verify: recovery safety ===\n");
+  const RECOVERY_RAW_IDS = ["PATIENT-900", "ACCESSION-900", "HOSPITAL-REC-900"];
+  const fileNameFor = (batchId: string): string =>
+    createHash("sha256").update(batchId, "utf8").digest("hex") + ".json";
+  const secret = Buffer.from("verify-recovery-secret-0123456789ab", "utf8");
+
+  const expectCorruptLoad = async (dir: string, batchId: string): Promise<Error> => {
+    const store = new ManifestStore(dir);
+    try {
+      await store.load();
+    } catch (err) {
+      assert(err instanceof CorruptStoreError, "corrupt entries must abort the load");
+      assert(
+        store.get(batchId) === undefined,
+        "a corrupt entry must never be admitted into the index",
+      );
+      return err as Error;
+    }
+    throw new Error(`corrupt entry for ${batchId} did not abort the load`);
+  };
+
+  try {
+    // 1. A valid manifest round-trips through a restart.
+    const okDir = mkdtempSync(join(tmpdir(), "verify-recovery-ok-"));
+    const batch = validateBatch({
+      batchId: "verify-recovery-ok",
+      records: [
+        {
+          recordId: "SMOKE-R1",
+          patientId: "SMOKE-P1",
+          accessionId: "SMOKE-A1",
+          relatedIds: [],
+          measurements: { tumorSizeMm: 11.5 },
+        },
+      ],
+    });
+    const hash = contentHash(batch);
+    const manifest = transformBatch(batch, new Aliaser(secret), hash);
+    const first = new ManifestStore(okDir);
+    assert((await first.create(batch.batchId, hash, manifest)).status === "created", "create failed");
+    const restored = new ManifestStore(okDir);
+    await restored.load();
+    assert(
+      JSON.stringify(restored.get(batch.batchId)) === JSON.stringify(manifest),
+      "a valid manifest must be queryable after a restart",
+    );
+    assert(
+      (await restored.create(batch.batchId, hash, manifest)).status === "replayed" &&
+        (await restored.create(batch.batchId, "other-hash", manifest)).status === "conflict",
+      "replay/conflict semantics must hold over restored entries",
+    );
+
+    // 2. The confirmed corrupt sample: hash-rule file name, valid JSON, but
+    // raw identifiers in the alias fields and malformed hash/timestamp.
+    const corruptDir = mkdtempSync(join(tmpdir(), "verify-recovery-corrupt-"));
+    await writeFile(
+      join(corruptDir, fileNameFor("restore-batch")),
+      JSON.stringify({
+        batchId: "restore-batch",
+        createdAt: "not-a-timestamp",
+        contentHash: "not-a-valid-hash",
+        records: [
+          {
+            recordAlias: "HOSPITAL-REC-900",
+            patientAlias: "PATIENT-900",
+            accessionAlias: "ACCESSION-900",
+            relatedAliases: ["HOSPITAL-REC-900"],
+            measurements: {},
+          },
+        ],
+      }),
+    );
+    const failure = await expectCorruptLoad(corruptDir, "restore-batch");
+    for (const raw of RECOVERY_RAW_IDS) {
+      assert(!failure.message.includes(raw), `diagnostics must not contain raw identifier ${raw}`);
+    }
+
+    // 3. Duplicate record aliases in a restored entry are rejected.
+    const dupDir = mkdtempSync(join(tmpdir(), "verify-recovery-dup-"));
+    const dupRecord = {
+      recordAlias: `rec-${"a".repeat(32)}`,
+      patientAlias: `pat-${"b".repeat(32)}`,
+      accessionAlias: `acc-${"c".repeat(32)}`,
+      relatedAliases: [],
+      measurements: {},
+    };
+    await writeFile(
+      join(dupDir, fileNameFor("verify-recovery-dup")),
+      JSON.stringify({
+        batchId: "verify-recovery-dup",
+        createdAt: "2026-10-04T00:00:00.000Z",
+        contentHash: "0".repeat(64),
+        records: [dupRecord, dupRecord],
+      }),
+    );
+    await expectCorruptLoad(dupDir, "verify-recovery-dup");
+
+    // 4. Unclosed cross references in a restored entry are rejected.
+    const danglingDir = mkdtempSync(join(tmpdir(), "verify-recovery-dangling-"));
+    await writeFile(
+      join(danglingDir, fileNameFor("verify-recovery-dangling")),
+      JSON.stringify({
+        batchId: "verify-recovery-dangling",
+        createdAt: "2026-10-04T00:00:00.000Z",
+        contentHash: "0".repeat(64),
+        records: [{ ...dupRecord, relatedAliases: [`rec-${"d".repeat(32)}`] }],
+      }),
+    );
+    await expectCorruptLoad(danglingDir, "verify-recovery-dangling");
+
+    process.stdout.write("--- verify: recovery safety OK\n");
+    return true;
+  } catch (err) {
+    process.stderr.write(
+      `--- verify: recovery safety FAILED: ${(err as Error)?.message ?? String(err)}\n`,
+    );
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   // Isolated data dir for the in-process servers spawned by the test suites.
   if (!process.env.DATA_DIR) {
@@ -220,12 +362,14 @@ async function main(): Promise<void> {
       "--test",
       "test/manifest.test.ts",
       "test/api.test.ts",
+      "test/recovery.test.ts",
     ]),
     runCommand("typescript build", process.execPath, [
       "node_modules/typescript/bin/tsc",
       "-p",
       "tsconfig.json",
     ]),
+    await runRecoverySmoke(),
     await runSmoke(),
   ];
 

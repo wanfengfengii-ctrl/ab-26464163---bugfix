@@ -230,21 +230,24 @@ test("validation rejects illegal structures and never echoes identifier values",
 test("store: create / replay / conflict semantics, persisted to disk", async () => {
   const dir = mkdtempSync(join(tmpdir(), "manifest-store-"));
   const store = new ManifestStore(dir);
+  // Hashes use the real 64-hex shape: only contract-valid documents are ever persisted.
+  const hash1 = "1".repeat(64);
+  const hash2 = "2".repeat(64);
   const manifest = transformBatch(
     validateBatch(validBody()),
     new Aliaser(SECRET),
-    "hash-1",
+    hash1,
   );
 
-  assert.equal((await store.create("batch-A", "hash-1", manifest)).status, "created");
-  assert.equal((await store.create("batch-A", "hash-1", manifest)).status, "replayed");
-  assert.equal((await store.create("batch-A", "hash-2", manifest)).status, "conflict");
-  assert.deepEqual(store.get("batch-A")?.contentHash, "hash-1");
+  assert.equal((await store.create("batch-A", hash1, manifest)).status, "created");
+  assert.equal((await store.create("batch-A", hash1, manifest)).status, "replayed");
+  assert.equal((await store.create("batch-A", hash2, manifest)).status, "conflict");
+  assert.deepEqual(store.get("batch-A")?.contentHash, hash1);
 
   // A fresh store over the same directory restores manifests.
   const restarted = new ManifestStore(dir);
   await restarted.load();
-  assert.equal(restarted.get("batch-A")?.contentHash, "hash-1");
-  assert.equal((await restarted.create("batch-A", "hash-1", manifest)).status, "replayed");
-  assert.equal((await restarted.create("batch-A", "hash-2", manifest)).status, "conflict");
+  assert.equal(restarted.get("batch-A")?.contentHash, hash1);
+  assert.equal((await restarted.create("batch-A", hash1, manifest)).status, "replayed");
+  assert.equal((await restarted.create("batch-A", hash2, manifest)).status, "conflict");
 });

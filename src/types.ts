@@ -57,6 +57,22 @@ export class ValidationFailed extends Error {
   }
 }
 
+/**
+ * A persisted shared manifest failed recovery validation during store load.
+ * The service must refuse to start rather than serve or silently overwrite
+ * the corrupt entry. Issues carry only rule codes and JSON paths, never the
+ * offending values (a corrupt file may contain raw identifiers).
+ */
+export class CorruptManifestError extends Error {
+  readonly issues: ValidationIssue[];
+
+  constructor(issues: ValidationIssue[]) {
+    super("persisted manifest failed recovery validation");
+    this.name = "CorruptManifestError";
+    this.issues = issues;
+  }
+}
+
 /** A manifest already exists for the batchId with different content -> HTTP 409. */
 export class BatchConflictError extends Error {
   readonly batchId: string;

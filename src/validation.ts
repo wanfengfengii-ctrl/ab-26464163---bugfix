@@ -17,16 +17,20 @@ import { ID_CLASSES, ValidationFailed } from "./types.ts";
 
 const MAX_ID_LENGTH = 256;
 const MAX_BATCH_ID_LENGTH = 128;
-const MAX_RECORDS = 10_000;
-const MAX_MEASUREMENT_KEYS = 1_000;
+export const MAX_RECORDS = 10_000;
+export const MAX_MEASUREMENT_KEYS = 1_000;
 const MAX_STRING_VALUE_LENGTH = 10_000;
-const MAX_RELATED = 1_000;
+export const MAX_RELATED = 1_000;
 
 /** Conservative identifier charset; implicitly forbids whitespace and control chars. */
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/\-]{0,255}$/;
-const BATCH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/;
-const MEASUREMENT_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.:/\-]{0,255}$/;
-const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+export const BATCH_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$/;
+export const MEASUREMENT_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.:/\-]{0,255}$/;
+export const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 
 class IssueCollector {
   readonly issues: ValidationIssue[] = [];
@@ -40,12 +44,26 @@ class IssueCollector {
   }
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isValidId(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_ID_LENGTH && ID_PATTERN.test(value);
+}
+
+/**
+ * Pure predicate form of the measurement contract, shared with the recovery
+ * path (see sharedValidation.ts): only scalars pass, strings are length
+ * capped and numbers must be finite.
+ */
+export function isValidMeasurementValue(value: unknown): value is MeasurementValue {
+  if (value === null) return true;
+  const t = typeof value;
+  if (t === "string") return (value as string).length <= MAX_STRING_VALUE_LENGTH;
+  if (t === "boolean") return true;
+  if (t === "number") return Number.isFinite(value as number);
+  return false;
 }
 
 function validateMeasurementValue(
